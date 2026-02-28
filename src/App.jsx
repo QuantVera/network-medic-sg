@@ -1079,23 +1079,42 @@ const dnsLikelyBroken = transportOk && !domainOk;
           ) : null}
         </div>
 
-        {/* Primary actions */}
-        <div className="mb-4 space-y-3">
-          <button
-            onClick={runScanFlow}
-            className="w-full rounded-2xl bg-white text-zinc-950 shadow-lg shadow-white/10 ring-1 ring-white/20 active:scale-[0.99]"
-          >
-            <div className="flex items-center justify-center gap-3 px-4 py-4">
-              {stage === "scanning" ? (
-                <Loader2 className="h-5 w-5 animate-spin" />
-              ) : (
-                <Wrench className="h-5 w-5" />
-              )}
-              <div className="text-base font-extrabold tracking-tight">
-                {stage === "scanning" ? "Running Scan…" : "Run Scan"}
-              </div>
-            </div>
-          </button>
+{/* Primary actions */}
+<div className="mb-4 space-y-3">
+
+  {/* Run Scan Button */}
+  <button
+    onClick={runScanFlow}
+    className="w-full rounded-2xl bg-white text-zinc-950 shadow-lg shadow-white/10 ring-1 ring-white/20 active:scale-[0.99]"
+  >
+    <div className="flex items-center justify-center gap-3 px-4 py-4">
+      {stage === "scanning" ? (
+        <Loader2 className="h-5 w-5 animate-spin" />
+      ) : (
+        <Wrench className="h-5 w-5" />
+      )}
+      <div className="text-base font-extrabold tracking-tight">
+        {stage === "scanning" ? "Running Scan…" : "Run Scan"}
+      </div>
+    </div>
+  </button>
+
+  {/* Limited Mode Warning */}
+  {!externalChecksEnabled && (
+    <div className="rounded-2xl border border-amber-500/30 bg-amber-500/10 p-3 text-xs text-amber-200 ring-1 ring-amber-500/20">
+      <div className="flex items-start gap-2">
+        <Lock className="mt-0.5 h-4 w-4" />
+        <div>
+          External Diagnostics is <span className="font-semibold">OFF</span>.
+          Results are limited.
+          <br />
+          Enable it above for full latency, DNS and captive portal testing.
+        </div>
+      </div>
+    </div>
+  )}
+
+</div>
 
           {showAfterButton ? (
             <div className="rounded-2xl border border-white/10 bg-white/5 p-3 ring-1 ring-white/10">
@@ -1467,30 +1486,41 @@ const dnsLikelyBroken = transportOk && !domainOk;
           </Card>
 
           <div className="rounded-3xl border border-white/10 bg-white/5 p-4 ring-1 ring-white/10">
-            <div className="flex items-start justify-between gap-4">
-              <div>
-                <div className="text-xs font-semibold tracking-wide text-zinc-400">
-                  DIAGNOSIS
-                </div>
-                <div className="mt-1 text-xl font-black tracking-tight">
-                  {diagnosis.label}
-                </div>
-                <div className="mt-2 text-sm leading-relaxed text-zinc-300">
-                  {diagnosis.reason}
-                </div>
-                {diagnosis.bullets?.length ? (
-                  <ul className="mt-3 list-disc space-y-1 pl-5 text-sm text-zinc-300">
-                    {diagnosis.bullets.map((b) => (
-                      <li key={b}>{b}</li>
-                    ))}
-                  </ul>
-                ) : null}
-              </div>
-              <div className="rounded-2xl bg-white/5 p-3 ring-1 ring-white/10">
-                <Activity className="h-6 w-6" />
-              </div>
+  <div className="flex items-start justify-between gap-4">
+    <div>
+      <div className="text-xs font-semibold tracking-wide text-zinc-400">DIAGNOSIS</div>
+
+      <div className="mt-1 text-xl font-black tracking-tight">{diagnosis.label}</div>
+
+      <div className="mt-2 text-sm leading-relaxed text-zinc-300">{diagnosis.reason}</div>
+
+      {diagnosis.bullets?.length ? (
+        <ul className="mt-3 list-disc space-y-1 pl-5 text-sm text-zinc-300">
+          {diagnosis.bullets.map((b) => (
+            <li key={b}>{b}</li>
+          ))}
+        </ul>
+      ) : null}
+
+      {externalChecksEnabled &&
+        latestResult?.latency?.bestMs != null &&
+        latestResult.latency.bestMs >= 900 && (
+          <div className="mt-3 rounded-xl bg-white/5 p-3 text-xs text-zinc-300 ring-1 ring-white/10">
+            <div className="font-semibold text-zinc-200">Auto Suggestion</div>
+            <div className="mt-1 text-zinc-400">
+              Latency is extremely high. Try switching to{" "}
+              <span className="text-zinc-200">4G-only</span> temporarily (5G handover can cause stalled sessions),
+              then toggle airplane mode and re-scan.
             </div>
           </div>
+        )}
+    </div>
+
+    <div className="rounded-2xl bg-white/5 p-3 ring-1 ring-white/10">
+      <Activity className="h-6 w-6" />
+    </div>
+  </div>
+</div>
 
           <div className="rounded-3xl border border-white/10 bg-zinc-950/60 p-4 shadow-[0_0_0_1px_rgba(255,255,255,0.04)]">
             <div className="mb-3 flex items-center gap-2">
