@@ -1275,7 +1275,7 @@ const dnsLikelyBroken = transportOk && !domainOk;
               />
               <MetricRow
                 icon={Network}
-                label="one.one.one.one (Cloudflare probe)"
+                label="Cloudflare (secondary probe)"
                 value={
                   latestResult?.latency?.cloudflare
                     ? `${latestResult.latency.cloudflare.ms} ms`
