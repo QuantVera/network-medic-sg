@@ -929,203 +929,79 @@ export default function NetworkMedic() {
             )}
           </Card>
 
-          <Card title="Latency (Ping)" icon={Timer} help="Measures how long it takes to reach the internet (timed fetch; no ICMP ping in browsers)." right={<span className="text-xs text-zinc-400">best of 3 probes</span>}>
-            <div className="space-y-3">
-              <MetricRow
-                icon={Globe}
-                label="google.com (204 probe)"
-                value={latestResult?.latency?.google204 ? `${latestResult.latency.google204.ms} ms` : "—"}
-                sub={
-                  latestResult?.latency?.google204
-                    ? latestResult.latency.google204.ok
-                      ? latestResult.latency.google204.opaque
-                        ? "Probe completed (opaque response)"
-                        : "Probe completed"
-                      : `Failed (${latestResult.latency.google204.error})`
-                    : externalChecksEnabled
-                      ? "Not tested"
-                      : "Disabled (Privacy Mode)"
-                }
-                status={
-                  !latestResult?.latency?.google204
-                    ? externalChecksEnabled
-                      ? "neutral"
-                      : "warn"
-                    : latestResult.latency.google204.ok
-                      ? latestResult.latency.google204.ms >= 900
-                        ? "bad"
-                        : latestResult.latency.google204.ms >= 450
-                          ? "warn"
-                          : "good"
-                      : "bad"
-                }
-              />
-
-              <MetricRow
-                icon={Network}
-                label="Cloudflare (secondary probe)"
-                value={latestResult?.latency?.cfTrace ? `${latestResult.latency.cfTrace.ms} ms` : "—"}
-                sub={
-                  latestResult?.latency?.cfTrace
-                    ? latestResult.latency.cfTrace.ok
-                      ? latestResult.latency.cfTrace.opaque
-                        ? "Probe completed (opaque response)"
-                        : "Probe completed"
-                      : `Failed (${latestResult.latency.cfTrace.error})`
-                    : externalChecksEnabled
-                      ? "Not tested"
-                      : "Disabled (Privacy Mode)"
-                }
-                status={
-                  !latestResult?.latency?.cfTrace
-                    ? externalChecksEnabled
-                      ? "neutral"
-                      : "warn"
-                    : latestResult.latency.cfTrace.ok
-                      ? latestResult.latency.cfTrace.ms >= 900
-                        ? "bad"
-                        : latestResult.latency.cfTrace.ms >= 450
-                          ? "warn"
-                          : "good"
-                      : "bad"
-                }
-              />
-
-              <MetricRow
-                icon={Globe}
-                label="cloudflare.com (domain probe)"
-                value={latestResult?.latency?.cfHome ? `${latestResult.latency.cfHome.ms} ms` : "—"}
-                sub={
-                  latestResult?.latency?.cfHome
-                    ? latestResult.latency.cfHome.ok
-                      ? latestResult.latency.cfHome.opaque
-                        ? "Probe completed (opaque response)"
-                        : "Probe completed"
-                      : `Failed (${latestResult.latency.cfHome.error})`
-                    : externalChecksEnabled
-                      ? "Not tested"
-                      : "Disabled (Privacy Mode)"
-                }
-                status={
-                  !latestResult?.latency?.cfHome
-                    ? externalChecksEnabled
-                      ? "neutral"
-                      : "warn"
-                    : latestResult.latency.cfHome.ok
-                      ? latestResult.latency.cfHome.ms >= 900
-                        ? "bad"
-                        : latestResult.latency.cfHome.ms >= 450
-                          ? "warn"
-                          : "good"
-                      : "bad"
-                }
-              />
-
-              <div className="rounded-2xl bg-white/5 p-3 text-xs text-zinc-400 ring-1 ring-white/10">
-                <div className="flex items-start gap-2">
-                  <CircleHelp className="mt-0.5 h-4 w-4 text-zinc-300" />
-                  <div>{latestResult?.latency?.note || "Latency is approximated via fetch timing."}</div>
-                </div>
-              </div>
-            </div>
-          </Card>
-
-          <Card title="Captive Portal Check" icon={ShieldAlert} help="Detects Wi-Fi networks that block the internet until you sign in (common on public Wi-Fi).">
-            <div className="space-y-3">
-              <MetricRow
-                icon={WifiOff}
-                label="Login-required intercept"
-                value={latestResult?.captive?.suspected == null ? "—" : latestResult.captive.suspected ? "Suspected" : "Not detected"}
-                sub={latestResult?.captive?.note || (externalChecksEnabled ? "Not tested" : "Disabled (Privacy Mode)")}
-                status={
-                  latestResult?.captive?.suspected == null ? (externalChecksEnabled ? "neutral" : "warn") : latestResult.captive.suspected ? "warn" : "good"
-                }
-              />
-              <div className="rounded-2xl bg-white/5 p-3 text-xs text-zinc-400 ring-1 ring-white/10">Tip: If suspected, turn off Wi-Fi and retry the scan.</div>
-            </div>
-          </Card>
-
-          <Card title="DNS Health" icon={Globe} help="DNS turns names (like google.com) into IPs. If DNS breaks, apps may say ‘no internet’ even with signal.">
-            <div className="space-y-3">
-              <MetricRow
-                icon={Globe}
-                label="Domain resolution"
-                value={latestResult?.dns?.ok == null ? "—" : latestResult.dns.ok ? "OK" : "Broken"}
-                sub={latestResult?.dns?.note || (externalChecksEnabled ? "Not tested" : "Disabled (Privacy Mode)")}
-                status={latestResult?.dns?.ok == null ? (externalChecksEnabled ? "neutral" : "warn") : latestResult.dns.ok ? "good" : "bad"}
-              />
-              <div className="rounded-2xl bg-white/5 p-3 text-xs text-zinc-400 ring-1 ring-white/10">
-                If DNS is broken: disable VPN/Private DNS, verify APN, toggle airplane mode, re-scan.
-              </div>
-            </div>
-          </Card>
-
-          <Card title="Device Factors" icon={Gauge} help="Best-effort signals from your browser (not hardware identifiers). Helps spot data saver or a busy phone.">
-            <div className="space-y-3">
-              <MetricRow
-                icon={Signal}
-                label="Network hint"
-                value={netHint.supported ? netHint.effectiveType.toUpperCase() : "Unknown"}
-                sub={
-                  netHint.supported
-                    ? `Downlink: ${netHint.downlink ?? "—"} Mb/s · RTT: ${netHint.rtt ?? "—"} ms · Save-Data: ${
-                        netHint.saveData == null ? "—" : netHint.saveData ? "ON" : "OFF"
-                      }`
-                    : "Your browser does not expose network hints."
-                }
-                status={netHint.supported ? "neutral" : "warn"}
-              />
-
-              <MetricRow
-                icon={Activity}
-                label="Device busy"
-                value={longTaskMs ? `${longTaskMs} ms` : "0 ms"}
-                sub="Time spent on long tasks while scanning (high values may mean CPU/thermal load)."
-                status={longTaskMs >= 1500 ? "warn" : "good"}
-              />
-            </div>
-          </Card>
-
+          {/* Latency (Ping) */}
           <Card
-            title="Carrier Configuration Guide"
-            icon={Signal}
-            help="APN is the carrier setting that lets your SIM connect to mobile data. Wrong APN can cause ‘no data’ even with signal."
-            right={
-              <select
-                value={carrier}
-                onChange={(e) => setCarrier(e.target.value)}
-                className="rounded-xl border border-white/10 bg-zinc-950/40 px-3 py-2 text-xs text-zinc-200 outline-none ring-1 ring-white/5"
-              >
-                <option value="unknown">Select carrier</option>
-                <option value="simba">SIMBA</option>
-                <option value="m1">M1</option>
-                <option value="singtel">Singtel</option>
-                <option value="starhub">StarHub</option>
-              </select>
-            }
+            title="Latency (Ping)"
+            icon={Timer}
+            help="Measures how long it takes to reach the internet (timed fetch; browsers can’t do true ICMP ping)."
+            right={<span className="text-xs text-zinc-400">best of 3 probes</span>}
           >
-            <div className="space-y-3">
-              <div className="rounded-2xl bg-white/5 p-3 ring-1 ring-white/10">
-                <div className="text-xs font-semibold text-zinc-300">Detected / Selected</div>
-                <div className="mt-1 text-lg font-extrabold">{carrierInfo.name}</div>
-                <div className="mt-2 text-sm text-zinc-300">
-                  <span className="text-zinc-400">APN:</span> <span className="font-bold text-zinc-100">{carrierInfo.apn}</span>
-                </div>
-                <div className="mt-2 text-xs text-zinc-400">{carrierInfo.notes}</div>
-              </div>
+            {(() => {
+              const latency = latestResult?.latency;
 
-              <div className="rounded-2xl bg-white/5 p-3 text-xs text-zinc-400 ring-1 ring-white/10">
-                <div className="mb-2 text-xs font-semibold text-zinc-300">Where to change APN</div>
-                <div className="space-y-1">
-                  <div>
-                    <span className="font-semibold text-zinc-200">iPhone:</span> Settings → Mobile Service → Mobile Data Network
-                  </div>
-                  <div>
-                    <span className="font-semibold text-zinc-200">Android:</span> Settings → Network & Internet → SIMs → Access Point Names
+              const getOpaque = (p) => {
+                if (!p) return false;
+                // support either shape: { opaque: true } OR { type: 'opaque' }
+                return Boolean(p.opaque ?? (typeof p.type === "string" && p.type === "opaque"));
+              };
+
+              const probeSub = (p) => {
+                if (!p) return externalChecksEnabled ? "Not tested" : "Disabled (Privacy Mode)";
+                if (p.ok) return getOpaque(p) ? "Probe completed (opaque response)" : "Probe completed";
+                return `Failed (${p.error || "Error"})`;
+              };
+
+              const probeStatus = (p) => {
+                if (!p) return externalChecksEnabled ? "neutral" : "warn";
+                if (!p.ok) return "bad";
+                if (typeof p.ms !== "number") return "neutral";
+                if (p.ms >= 900) return "bad";
+                if (p.ms >= 450) return "warn";
+                return "good";
+              };
+
+              const probeValue = (p) => (p && typeof p.ms === "number" ? `${p.ms} ms` : "—");
+
+              return (
+                <div className="space-y-3">
+                  <MetricRow
+                    icon={Globe}
+                    label="google.com (204 probe)"
+                    value={probeValue(latency?.google204)}
+                    sub={probeSub(latency?.google204)}
+                    status={probeStatus(latency?.google204)}
+                  />
+
+                  <MetricRow
+                    icon={Network}
+                    label="Cloudflare (secondary probe)"
+                    value={probeValue(latency?.cfTrace)}
+                    sub={probeSub(latency?.cfTrace)}
+                   status={probeStatus(latency?.cfTrace)}
+                  />
+
+                  <MetricRow
+                    icon={Globe}
+                    label="cloudflare.com (domain probe)"
+                    value={probeValue(latency?.cfHome)}
+                    sub={probeSub(latency?.cfHome)}
+                    status={probeStatus(latency?.cfHome)}
+                  />
+
+                  <div className="rounded-2xl bg-white/5 p-3 text-xs text-zinc-400 ring-1 ring-white/10">
+                    <div className="flex items-start gap-2">
+                      <CircleHelp className="mt-0.5 h-4 w-4 text-zinc-300" />
+                      <div>
+                        Browsers can’t do true ICMP ping — these are timed HTTPS probes.{" "}
+                        <span className="text-zinc-200">“Opaque response” is normal</span>. If one probe fails
+                        (e.g., TypeError) but others succeed, your internet is likely OK and that endpoint is
+                        blocked/filtered.
+                      </div>
+                    </div>
                   </div>
                 </div>
-              </div>
-            </div>
+              );
+            })()}
           </Card>
 
           {/* Diagnosis + Auto suggestion */}
