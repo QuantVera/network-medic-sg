@@ -43,7 +43,12 @@ const BRAND = {
 const ENDPOINTS = {
   google204: "https://www.google.com/generate_204",
   gstatic204: "https://www.gstatic.com/generate_204",
-  cloudflare: "https://1.1.1.1/",
+
+  // Use DOMAIN instead of raw IP: far fewer mobile carrier blocks
+  cfTrace: "https://one.one.one.one/cdn-cgi/trace",
+  cfHome: "https://www.cloudflare.com/",
+
+  // DoH (best-effort; may be blocked)
   dohCloudflare: "https://cloudflare-dns.com/dns-query?name=example.com&type=A",
 };
 
@@ -707,10 +712,18 @@ export default function NetworkMedic() {
     }
 
     // Latency probes (best-effort)
-    const [g204, cf] = await Promise.all([
-      timedFetch(ENDPOINTS.google204, 2500),
-      timedFetch(ENDPOINTS.cloudflare, 2500),
-    ]);
+    const [g204, cfTrace, cfHome] = await Promise.all([
+  timedFetch(ENDPOINTS.google204, 2500),
+  timedFetch(ENDPOINTS.cfTrace, 2500),
+  timedFetch(ENDPOINTS.cfHome, 2500),
+]);
+
+const latencies = [g204, cfTrace, cfHome]
+  .filter((x) => x && typeof x.ms === "number")
+  .map((x) => x.ms);
+
+const bestMs = latencies.length ? Math.min(...latencies) : null;
+const worstMs = latencies.length ? Math.max(...latencies) : null;
 
     const bestMs = Math.min(g204.ms, cf.ms);
     const worstMs = Math.max(g204.ms, cf.ms);
@@ -725,7 +738,14 @@ export default function NetworkMedic() {
       (g204.ok || cf.ok);
 
     // DNS heuristic: if name probe errors but IP-ish probe completes, suspect DNS/APN/VPN/Private DNS
-    const dnsLikelyBroken = g204.ok === false && cf.ok === true;
+    // Transport looks OK if ANY probe worked
+const transportOk = [g204, cfTrace, cfHome].some((p) => p?.ok);
+
+// Domain reachability evidence (2 domains)
+const domainOk = g204?.ok || cfHome?.ok;
+
+// DNS is suspected only when transport OK but domains not OK
+const dnsLikelyBroken = transportOk && !domainOk;
 
     // DoH best-effort (often opaque/blocked)
     const doh = await timedFetch(ENDPOINTS.dohCloudflare, 2500, {
@@ -734,10 +754,10 @@ export default function NetworkMedic() {
 
     const dnsOk = !dnsLikelyBroken;
     const dnsNote = dnsLikelyBroken
-      ? "Hostname probe failed but direct probe completed — DNS likely broken (APN/VPN/Private DNS)."
+      ? "Transport seems reachable but domains fail — DNS/APN/VPN/Private DNS likely."
       : doh.ok
-        ? "DNS appears OK (best effort)."
-        : "DNS looks OK, but DoH probe was inconclusive (blocked or opaque).";
+        ? "DNS resolution appears OK (best effort)."
+        : "DNS looks OK, but DoH probe was inconclusive (blocked/opaque).";
 
     return {
       label,
@@ -746,7 +766,8 @@ export default function NetworkMedic() {
       networkHint,
       latency: {
         google204: g204,
-        cloudflare: cf,
+        cloudflare: cfTrace,
+        cfHome, 
         bestMs,
         worstMs,
         note:
@@ -1235,7 +1256,7 @@ export default function NetworkMedic() {
               />
               <MetricRow
                 icon={Network}
-                label="1.1.1.1 (Cloudflare probe)"
+                label="Cloudflare (one.one.one.one)"
                 value={
                   latestResult?.latency?.cloudflare
                     ? `${latestResult.latency.cloudflare.ms} ms`
