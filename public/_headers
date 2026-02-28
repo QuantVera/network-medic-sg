@@ -1,10 +1,15 @@
 /*
   X-Frame-Options: DENY
-  Referrer-Policy: no-referrer
   X-Content-Type-Options: nosniff
-  Permissions-Policy: geolocation=(), microphone=(), camera=()
-  Content-Security-Policy: default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self' https://www.google.com https://www.gstatic.com https://one.one.one.one https://cloudflare-dns.com; base-uri 'self'; frame-ancestors 'none';
-  X-Content-Type-Options: nosniff
-  X-Frame-Options: DENY
   Referrer-Policy: no-referrer
   Permissions-Policy: geolocation=(), microphone=(), camera=()
+  Content-Security-Policy: default-src 'self'; base-uri 'self'; frame-ancestors 'none'; form-action 'self'; object-src 'none'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; connect-src 'self' https://www.google.com https://www.gstatic.com https://one.one.one.one https://cloudflare-dns.com; font-src 'self'; upgrade-insecure-requests
+  Cross-Origin-Opener-Policy: same-origin
+  Cross-Origin-Resource-Policy: same-origin
+  Cross-Origin-Embedder-Policy: unsafe-none
+
+/sw.js
+  Cache-Control: no-store
+
+/registerSW.js
+  Cache-Control: no-store
