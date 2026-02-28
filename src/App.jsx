@@ -20,19 +20,17 @@ import {
 } from "lucide-react";
 
 /**
- * Network Medic — single-page mobile-web app (React + Tailwind)
+ * Network Medic — client-only diagnostic helper (React + Tailwind)
  *
- * Privacy posture (default):
+ * Privacy posture:
  * - No accounts, no analytics, no tracking.
- * - No data is sent to any server controlled by the app (client-only).
- * - External diagnostic checks are OPTIONAL and OFF by default.
- * - When enabled, the app will make outbound HTTPS requests to public endpoints
- *   (e.g., Google/Cloudflare) purely to infer connectivity.
+ * - External diagnostics are OFF by default.
+ * - When enabled, this app performs outbound HTTPS requests to public endpoints
+ *   purely to infer connectivity (browser-safe; no ICMP ping).
  *
  * Security posture:
- * - No 3rd-party scripts.
- * - No persistent storage.
- * - Recommend strict CSP + connect-src allowlist at deploy time.
+ * - No third-party scripts.
+ * - No persistent storage required.
  */
 
 const BRAND = {
@@ -40,15 +38,17 @@ const BRAND = {
   tagline: "Signal bars but no internet? Let’s diagnose your connection.",
 };
 
+// Prefer domain endpoints (raw IP often blocked on mobile networks)
 const ENDPOINTS = {
+  // 204 endpoints: common connectivity checks
   google204: "https://www.google.com/generate_204",
   gstatic204: "https://www.gstatic.com/generate_204",
 
-  // Use DOMAIN instead of raw IP: far fewer mobile carrier blocks
+  // Cloudflare domain endpoints (more reliable than 1.1.1.1 IP)
   cfTrace: "https://one.one.one.one/cdn-cgi/trace",
   cfHome: "https://www.cloudflare.com/",
 
-  // DoH (best-effort; may be blocked)
+  // DoH (best-effort; may be blocked/opaque)
   dohCloudflare: "https://cloudflare-dns.com/dns-query?name=example.com&type=A",
 };
 
@@ -56,17 +56,15 @@ function clamp(n, a, b) {
   return Math.max(a, Math.min(b, n));
 }
 
-/**
- * Best-effort fetch timing probe.
- * Note: With `mode: "no-cors"`, most responses are opaque and status is usually 0.
- * We treat "fetch resolved" as "probe completed", NOT as a guaranteed successful HTTP response.
- */
 async function timedFetch(url, timeoutMs = 2500, extraHeaders = {}) {
   const controller = new AbortController();
   const start = performance.now();
   const id = setTimeout(() => controller.abort(), timeoutMs);
 
   try {
+    // NOTE:
+    // - no-cors yields opaque responses but still measures timing
+    // - this is intentional: avoids reading content; safer for privacy
     const res = await fetch(url, {
       method: "GET",
       mode: "no-cors",
@@ -78,24 +76,22 @@ async function timedFetch(url, timeoutMs = 2500, extraHeaders = {}) {
       headers: extraHeaders,
     });
 
-    const ms = Math.round(performance.now() - start);
-    const type = res?.type || "opaque";
-
+    const end = performance.now();
     return {
-      ok: true, // means request did not throw
+      ok: true, // "ok" means fetch completed; in no-cors it doesn't mean status 200
       status: typeof res?.status === "number" ? res.status : 0,
-      type,
-      opaque: type === "opaque",
-      ms,
+      type: res?.type || "opaque",
+      opaque: res?.type === "opaque",
+      ms: Math.round(end - start),
     };
   } catch (e) {
-    const ms = Math.round(performance.now() - start);
+    const end = performance.now();
     return {
       ok: false,
       status: 0,
       type: "error",
       opaque: false,
-      ms,
+      ms: Math.round(end - start),
       error: e?.name || "FetchError",
     };
   } finally {
@@ -103,18 +99,68 @@ async function timedFetch(url, timeoutMs = 2500, extraHeaders = {}) {
   }
 }
 
-function classifyHealth({
-  online,
-  externalChecksEnabled,
-  latencyMs,
-  dnsOk,
-  captiveLikely,
-}) {
+function getNetworkHint() {
+  const conn = navigator.connection || navigator.mozConnection || navigator.webkitConnection;
+  if (!conn) {
+    return { supported: false, effectiveType: "unknown", downlink: null, rtt: null, saveData: null };
+  }
+  return {
+    supported: true,
+    effectiveType: conn.effectiveType || "unknown",
+    downlink: typeof conn.downlink === "number" ? conn.downlink : null,
+    rtt: typeof conn.rtt === "number" ? conn.rtt : null,
+    saveData: typeof conn.saveData === "boolean" ? conn.saveData : null,
+  };
+}
+
+function supportsLongTask() {
+  try {
+    return typeof PerformanceObserver !== "undefined";
+  } catch {
+    return false;
+  }
+}
+
+function reliabilityScore({ externalChecksEnabled, networkHintSupported, longTaskSupported }) {
+  if (!externalChecksEnabled) {
+    return {
+      level: "low",
+      label: "Low",
+      note: "External diagnostics are OFF — results are guidance-only.",
+    };
+  }
+
+  const extras = (networkHintSupported ? 1 : 0) + (longTaskSupported ? 1 : 0);
+
+  if (extras >= 2) {
+    return {
+      level: "high",
+      label: "High",
+      note: "External probes + device signals available (best accuracy this browser can offer).",
+    };
+  }
+
+  if (extras === 1) {
+    return {
+      level: "medium",
+      label: "Medium",
+      note: "External probes available, but some device/network APIs are not supported.",
+    };
+  }
+
+  return {
+    level: "medium",
+    label: "Medium",
+    note: "External probes available. Device/network hints are limited on this browser.",
+  };
+}
+
+function classifyHealth({ online, externalChecksEnabled, latencyMs, dnsOk, captiveLikely }) {
   if (!online) {
     return {
       level: "red",
       title: "No Connectivity",
-      detail: "Device appears offline (or network blocks connectivity).",
+      detail: "Device reports offline, or the network blocks outbound traffic.",
       label: "OFFLINE",
       icon: BadgeX,
     };
@@ -134,116 +180,43 @@ function classifyHealth({
     return {
       level: "amber",
       title: "Captive Portal Suspected",
-      detail: "You may be stuck on a ‘Login required’ Wi-Fi page.",
+      detail: "You may be stuck on a Wi-Fi login/intercept page.",
       label: "LOGIN REQUIRED",
       icon: ShieldAlert,
     };
   }
 
-  if (latencyMs >= 900) {
+  if (dnsOk === false) {
     return {
       level: "amber",
-      title: "Stalled Connection",
-      detail:
-        "Latency is extremely high — congestion or a stuck radio session is likely.",
-      label: "CONGESTION / STALL",
-      icon: Activity,
+      title: "DNS / APN Issue",
+      detail: "Transport looks reachable but domains fail (often APN/VPN/Private DNS).",
+      label: "DNS DEGRADED",
+      icon: Globe,
     };
   }
 
-  if (!dnsOk) {
+  if (latencyMs != null && latencyMs >= 900) {
     return {
-      level: latencyMs >= 900 ? "red" : "amber",
-      title: "DNS Issues",
-      detail: "Domain resolution appears broken (often APN/DNS/VPN settings).",
-      label: "DNS DEGRADED",
-      icon: Globe,
+      level: "amber",
+      title: "Congestion / Stall",
+      detail: "Latency is extremely high — congestion, weak coverage, or a stalled session.",
+      label: "CONGESTION / STALL",
+      icon: Activity,
     };
   }
 
   return {
     level: "green",
     title: "Healthy",
-    detail: "Data path looks OK (best-effort browser checks).",
+    detail: "Connectivity looks normal based on browser-safe diagnostics.",
     label: "OK",
     icon: BadgeCheck,
   };
 }
 
-function getNetworkHint() {
-  const conn =
-    navigator.connection || navigator.mozConnection || navigator.webkitConnection;
-
-  if (!conn) {
-    return {
-      supported: false,
-      effectiveType: "unknown",
-      downlink: null,
-      rtt: null,
-      saveData: null,
-    };
-  }
-
-  return {
-    supported: true,
-    effectiveType: conn.effectiveType || "unknown",
-    downlink: typeof conn.downlink === "number" ? conn.downlink : null,
-    rtt: typeof conn.rtt === "number" ? conn.rtt : null,
-    saveData: typeof conn.saveData === "boolean" ? conn.saveData : null,
-  };
-}
-
-function supportsLongTask() {
-  try {
-    return typeof PerformanceObserver !== "undefined";
-  } catch {
-    return false;
-  }
-}
-
-function reliabilityScore({
-  externalChecksEnabled,
-  networkHintSupported,
-  longTaskSupported,
-}) {
-  if (!externalChecksEnabled) {
-    return {
-      level: "low",
-      label: "Low",
-      note:
-        "Privacy Mode is ON — external checks are disabled, so diagnosis is guidance-only.",
-    };
-  }
-
-  const extras = (networkHintSupported ? 1 : 0) + (longTaskSupported ? 1 : 0);
-
-  if (extras >= 2) {
-    return {
-      level: "high",
-      label: "High",
-      note:
-        "External probes + device signals available (best accuracy this browser can offer).",
-    };
-  }
-
-  if (extras === 1) {
-    return {
-      level: "medium",
-      label: "Medium",
-      note:
-        "External probes are available, but some device/network APIs are not supported.",
-    };
-  }
-
-  return {
-    level: "medium",
-    label: "Medium",
-    note:
-      "External probes are available. Device/network hints are limited on this browser.",
-  };
-}
-
 function detectCarrierHint() {
+  // Browser carrier detection is weak; keep best-effort only.
   const ua = (navigator.userAgent || "").toLowerCase();
   const rules = [
     { key: "simba", match: ["simba", "tpg"] },
@@ -258,35 +231,14 @@ function detectCarrierHint() {
 }
 
 const CARRIER_APN = {
-  simba: {
-    name: "SIMBA (TPG)",
-    apn: "tpg",
-    notes:
-      "If you have bars but no data, SIMBA often needs APN set to ‘tpg’.",
-  },
-  singtel: {
-    name: "Singtel",
-    apn: "(auto) e-ideas",
-    notes:
-      "Usually auto-configures APN. If issues persist, reset network settings.",
-  },
-  starhub: {
-    name: "StarHub",
-    apn: "(auto) shwap",
-    notes:
-      "Typically auto-configures. Verify mobile data is enabled and plan not throttled.",
-  },
-  m1: {
-    name: "M1",
-    apn: "(auto) sunsurf",
-    notes:
-      "Typically auto-configures. If DNS seems broken, toggle airplane mode and retry.",
-  },
+  simba: { name: "SIMBA (TPG)", apn: "tpg", notes: "If you have bars but no data, SIMBA often needs APN set to ‘tpg’." },
+  singtel: { name: "Singtel", apn: "(auto)", notes: "Usually auto-configures. If issues persist, reset network settings." },
+  starhub: { name: "StarHub", apn: "(auto)", notes: "Usually auto-configures. Verify mobile data is ON and plan not throttled." },
+  m1: { name: "M1", apn: "(auto)", notes: "Usually auto-configures. If DNS seems broken, toggle airplane mode and retry." },
   unknown: {
     name: "Unknown Carrier",
     apn: "(check carrier docs)",
-    notes:
-      "Carrier detection isn’t reliable in browsers. Select your carrier below for APN guidance.",
+    notes: "Carrier detection isn’t reliable in browsers. Select your carrier for APN guidance.",
   },
 };
 
@@ -298,18 +250,9 @@ function Badge({ level, label }) {
         ? "bg-amber-500/15 text-amber-200 ring-amber-500/25"
         : "bg-rose-500/15 text-rose-200 ring-rose-500/25";
 
-  const dot =
-    level === "green"
-      ? "bg-emerald-300"
-      : level === "amber"
-        ? "bg-amber-200"
-        : "bg-rose-200";
-
   return (
-    <span
-      className={`inline-flex items-center gap-2 rounded-full px-3 py-1 text-xs font-semibold tracking-wide ring-1 ${styles}`}
-    >
-      <span className={`h-1.5 w-1.5 rounded-full ${dot}`} />
+    <span className={`inline-flex items-center gap-2 rounded-full px-3 py-1 text-xs font-semibold tracking-wide ring-1 ${styles}`}>
+      <span className={`h-1.5 w-1.5 rounded-full ${level === "green" ? "bg-emerald-300" : level === "amber" ? "bg-amber-200" : "bg-rose-200"}`} />
       {label}
     </span>
   );
@@ -323,18 +266,9 @@ function ReliabilityBadge({ level, label }) {
         ? "bg-amber-500/15 text-amber-200 ring-amber-500/25"
         : "bg-zinc-500/15 text-zinc-200 ring-zinc-500/25";
 
-  const dot =
-    level === "high"
-      ? "bg-emerald-300"
-      : level === "medium"
-        ? "bg-amber-200"
-        : "bg-zinc-200";
-
   return (
-    <span
-      className={`inline-flex items-center gap-2 rounded-full px-3 py-1 text-xs font-semibold tracking-wide ring-1 ${styles}`}
-    >
-      <span className={`h-1.5 w-1.5 rounded-full ${dot}`} />
+    <span className={`inline-flex items-center gap-2 rounded-full px-3 py-1 text-xs font-semibold tracking-wide ring-1 ${styles}`}>
+      <span className={`h-1.5 w-1.5 rounded-full ${level === "high" ? "bg-emerald-300" : level === "medium" ? "bg-amber-200" : "bg-zinc-200"}`} />
       Reliability: {label}
     </span>
   );
@@ -342,13 +276,7 @@ function ReliabilityBadge({ level, label }) {
 
 function MetricRow({ icon: Icon, label, value, sub, status }) {
   const tint =
-    status === "good"
-      ? "text-emerald-300"
-      : status === "warn"
-        ? "text-amber-200"
-        : status === "bad"
-          ? "text-rose-200"
-          : "text-zinc-300";
+    status === "good" ? "text-emerald-300" : status === "warn" ? "text-amber-200" : status === "bad" ? "text-rose-200" : "text-zinc-300";
 
   return (
     <div className="flex items-start justify-between gap-3">
@@ -386,26 +314,6 @@ function Card({ title, icon: Icon, children, right, help }) {
   );
 }
 
-function ProgressPill({ step, total, label }) {
-  const pct = total <= 0 ? 0 : (step / total) * 100;
-  return (
-    <div className="w-full">
-      <div className="mb-1 flex items-center justify-between text-xs text-zinc-400">
-        <span>{label}</span>
-        <span>
-          {step}/{total}
-        </span>
-      </div>
-      <div className="h-2 w-full overflow-hidden rounded-full bg-white/5">
-        <div
-          className="h-full rounded-full bg-white/20"
-          style={{ width: `${clamp(pct, 0, 100)}%` }}
-        />
-      </div>
-    </div>
-  );
-}
-
 function Toggle({ enabled, onChange, label, hint, icon: Icon = Lock }) {
   return (
     <div className="flex items-start justify-between gap-3 rounded-2xl border border-white/10 bg-white/5 p-3 ring-1 ring-white/10">
@@ -420,18 +328,29 @@ function Toggle({ enabled, onChange, label, hint, icon: Icon = Lock }) {
         type="button"
         onClick={() => onChange(!enabled)}
         className={`relative h-7 w-12 flex-shrink-0 rounded-full ring-1 transition ${
-          enabled
-            ? "bg-emerald-500/30 ring-emerald-500/30"
-            : "bg-white/10 ring-white/15"
+          enabled ? "bg-emerald-500/30 ring-emerald-500/30" : "bg-white/10 ring-white/15"
         }`}
         aria-pressed={enabled}
       >
-        <span
-          className={`absolute top-0.5 h-6 w-6 rounded-full bg-zinc-950 ring-1 ring-white/20 transition ${
-            enabled ? "left-5" : "left-0.5"
-          }`}
-        />
+        <span className={`absolute top-0.5 h-6 w-6 rounded-full bg-zinc-950 ring-1 ring-white/20 transition ${enabled ? "left-5" : "left-0.5"}`} />
       </button>
+    </div>
+  );
+}
+
+function ProgressPill({ step, total, label }) {
+  const pct = total <= 0 ? 0 : (step / total) * 100;
+  return (
+    <div className="w-full">
+      <div className="mb-1 flex items-center justify-between text-xs text-zinc-400">
+        <span>{label}</span>
+        <span>
+          {step}/{total}
+        </span>
+      </div>
+      <div className="h-2 w-full overflow-hidden rounded-full bg-white/5">
+        <div className="h-full rounded-full bg-white/20" style={{ width: `${clamp(pct, 0, 100)}%` }} />
+      </div>
     </div>
   );
 }
@@ -442,116 +361,50 @@ function formatDeltaMs(delta) {
   return `${sign}${delta} ms`;
 }
 
-function scoreDiagnosis({ externalChecksEnabled, baseline, after, longTaskMs }) {
-  if (!externalChecksEnabled) {
-    return {
-      label: "Limited Scan",
-      reason: "External diagnostics are OFF. Enable them for deeper checks.",
-      bullets: ["No external probes performed.", "No data stored by this app."],
-    };
+function buildAutoSuggestion({ externalChecksEnabled, latestResult, abDeltaMs }) {
+  if (!externalChecksEnabled || !latestResult) return null;
+
+  const bestMs = latestResult.latency?.bestMs ?? null;
+  const dnsOk = latestResult.dns?.ok ?? null;
+  const captive = latestResult.captive?.suspected ?? null;
+
+  // Captive portal suggestion
+  if (captive === true) {
+    return "Captive portal suspected — turn OFF Wi-Fi, open a browser to complete login, then re-scan.";
   }
 
-  const latest = after || baseline;
-  if (!latest) {
-    return { label: "Ready", reason: "Run a scan to generate results.", bullets: [] };
+  // DNS issue suggestion
+  if (dnsOk === false) {
+    return "Domains failing but transport reachable — disable VPN/Private DNS, verify APN, then toggle airplane mode and re-scan.";
   }
 
-  const latencyMs = latest.latency.bestMs ?? 9999;
-  const bullets = [];
-
-  if (longTaskMs >= 1500) {
-    bullets.push("Device seems busy — close heavy apps and retry.");
+  // High latency suggestion
+  if (bestMs != null && bestMs >= 900) {
+    return "Latency extremely high — try switching to 4G/LTE-only temporarily, move near a window, toggle airplane mode (10s), then re-scan.";
   }
 
-  if (latest.captive.suspected) {
-    return {
-      label: "Captive Portal",
-      reason:
-        "You may be on Wi-Fi that requires login. Turn off Wi-Fi or complete sign-in.",
-      bullets: [
-        "Open browser to sign in (public Wi-Fi).",
-        "Disable Wi-Fi to test mobile data.",
-        ...bullets,
-      ],
-    };
+  // A/B delta suggestion
+  if (abDeltaMs != null && abDeltaMs <= -250) {
+    return "Big improvement after airplane mode — likely a stalled data session. If frequent: reboot phone or re-seat SIM.";
   }
 
-  if (latest.dns.ok === false) {
-    return {
-      label: "DNS / APN Issue",
-      reason:
-        "Domains appear broken — often APN/VPN/Private DNS misconfiguration.",
-      bullets: [
-        "Check APN (SIMBA often requires APN: tpg).",
-        "Disable VPN / Private DNS and retry.",
-        ...bullets,
-      ],
-    };
+  if (abDeltaMs != null && abDeltaMs >= 250) {
+    return "Latency worsened after reset — likely congestion/coverage. Try a different spot/time and re-scan.";
   }
 
-  if (baseline && after && baseline.latency.bestMs != null && after.latency.bestMs != null) {
-    const delta = after.latency.bestMs - baseline.latency.bestMs;
-    const improved = delta <= -250;
-    const worsened = delta >= 250;
-
-    if (improved && baseline.latency.bestMs >= 600) {
-      return {
-        label: "Stalled Radio Session",
-        reason:
-          "After airplane mode, latency improved a lot — often a stuck data session.",
-        bullets: [
-          "If frequent: reboot phone or re-seat SIM.",
-          "If location-specific: tower handover/congestion.",
-          ...bullets,
-        ],
-      };
-    }
-
-    if (worsened && after.latency.bestMs >= 900) {
-      return {
-        label: "Congestion / Coverage",
-        reason:
-          "Latency worsened and is very high — likely congestion, weak coverage, or throttling.",
-        bullets: ["Move to open area / near window.", "Try 4G-only mode temporarily.", ...bullets],
-      };
-    }
-  }
-
-  if (latencyMs >= 900) {
-    return {
-      label: "Radio Congestion",
-      reason:
-        "Latency is extremely high. Congestion or a stalled session is likely.",
-      bullets: ["Toggle airplane mode then re-run.", "Retry later (peak-time congestion).", ...bullets],
-    };
-  }
-
-  if (latencyMs >= 450) {
-    return {
-      label: "Degraded",
-      reason:
-        "Latency is elevated — indoor dead spot, congestion, or throttling.",
-      bullets: ["Re-test with Wi-Fi OFF.", "Try a different location/time.", ...bullets],
-    };
-  }
-
-  return {
-    label: "Healthy",
-    reason: "Connectivity looks normal based on browser-safe diagnostics.",
-    bullets: ["If apps still fail, check VPN/Private DNS/data saver modes.", ...bullets],
-  };
+  return "If apps still fail despite a healthy scan: check Data Saver, VPN, Private DNS, and background restrictions.";
 }
 
 export default function NetworkMedic() {
-  const [stage, setStage] = useState("idle");
+  const [stage, setStage] = useState("idle"); // idle | scanning | done
   const [progress, setProgress] = useState(0);
 
   const [externalChecksEnabled, setExternalChecksEnabled] = useState(false);
-
   const [abModeEnabled, setAbModeEnabled] = useState(true);
-  const [abPhase, setAbPhase] = useState("none");
+  const [abPhase, setAbPhase] = useState("none"); // none | baselineDone | afterDone
 
   const [carrier, setCarrier] = useState(() => detectCarrierHint());
+  const carrierInfo = CARRIER_APN[carrier] || CARRIER_APN.unknown;
 
   const [baseline, setBaseline] = useState(null);
   const [after, setAfter] = useState(null);
@@ -560,37 +413,29 @@ export default function NetworkMedic() {
   const longTaskMsRef = useRef(0);
   const perfObsRef = useRef(null);
 
+  const timerRef = useRef(null);
+
   const [scanMeta, setScanMeta] = useState({
     timestamp: null,
     online: typeof navigator.onLine === "boolean" ? navigator.onLine : true,
     networkHint: getNetworkHint(),
   });
 
-  const timerRef = useRef(null);
+  const netHint = scanMeta.networkHint;
+  const longTaskSupported = supportsLongTask();
 
   useEffect(() => {
-    const onOnline = () =>
+    const onOnline = () => {
       setScanMeta((s) => ({
         ...s,
         online: typeof navigator.onLine === "boolean" ? navigator.onLine : true,
       }));
+    };
     window.addEventListener("online", onOnline);
     window.addEventListener("offline", onOnline);
     return () => {
       window.removeEventListener("online", onOnline);
       window.removeEventListener("offline", onOnline);
-    };
-  }, []);
-
-  // Cleanup if user navigates away mid-scan
-  useEffect(() => {
-    return () => {
-      if (timerRef.current) clearInterval(timerRef.current);
-      try {
-        perfObsRef.current?.disconnect?.();
-      } catch {
-        // ignore
-      }
     };
   }, []);
 
@@ -623,25 +468,26 @@ export default function NetworkMedic() {
     perfObsRef.current = null;
   }
 
-  const carrierInfo = CARRIER_APN[carrier] || CARRIER_APN.unknown;
+  function clearProgressTimer() {
+    if (timerRef.current) {
+      clearInterval(timerRef.current);
+      timerRef.current = null;
+    }
+  }
+
+  const reliability = useMemo(() => {
+    return reliabilityScore({
+      externalChecksEnabled,
+      networkHintSupported: netHint.supported,
+      longTaskSupported,
+    });
+  }, [externalChecksEnabled, netHint.supported, longTaskSupported]);
+
   const latestResult = after || baseline;
 
-  const netHint = scanMeta.networkHint;
-  const longTaskSupported = supportsLongTask();
-
-  const reliability = useMemo(
-    () =>
-      reliabilityScore({
-        externalChecksEnabled,
-        networkHintSupported: netHint.supported,
-        longTaskSupported,
-      }),
-    [externalChecksEnabled, netHint.supported, longTaskSupported]
-  );
-
   const health = useMemo(() => {
-    const latencyMs = latestResult?.latency?.bestMs ?? 9999;
-    const dnsOk = latestResult?.dns?.ok ?? true;
+    const latencyMs = latestResult?.latency?.bestMs ?? null;
+    const dnsOk = latestResult?.dns?.ok ?? null;
     const captiveLikely = latestResult?.captive?.suspected ?? false;
 
     return classifyHealth({
@@ -655,38 +501,29 @@ export default function NetworkMedic() {
 
   const HealthIcon = health.icon;
 
-  const diagnosis = useMemo(
-    () => scoreDiagnosis({ externalChecksEnabled, baseline, after, longTaskMs }),
-    [externalChecksEnabled, baseline, after, longTaskMs]
-  );
-
   const deltas = useMemo(() => {
-    if (!baseline || !after) {
-      return { latencyDelta: null, dnsChanged: null, captiveChanged: null };
-    }
-
+    if (!baseline || !after) return { latencyDelta: null, dnsChanged: null, captiveChanged: null };
     const latencyDelta =
-      baseline.latency.bestMs != null && after.latency.bestMs != null
-        ? after.latency.bestMs - baseline.latency.bestMs
-        : null;
-
-    const dnsChanged =
-      baseline.dns.ok != null && after.dns.ok != null
-        ? after.dns.ok !== baseline.dns.ok
-        : null;
-
+      baseline.latency?.bestMs != null && after.latency?.bestMs != null ? after.latency.bestMs - baseline.latency.bestMs : null;
+    const dnsChanged = baseline.dns?.ok != null && after.dns?.ok != null ? after.dns.ok !== baseline.dns.ok : null;
     const captiveChanged =
-      baseline.captive.suspected != null && after.captive.suspected != null
-        ? after.captive.suspected !== baseline.captive.suspected
-        : null;
-
+      baseline.captive?.suspected != null && after.captive?.suspected != null ? after.captive.suspected !== baseline.captive.suspected : null;
     return { latencyDelta, dnsChanged, captiveChanged };
   }, [baseline, after]);
+
+  const autoSuggestion = useMemo(() => {
+    return buildAutoSuggestion({
+      externalChecksEnabled,
+      latestResult,
+      abDeltaMs: deltas.latencyDelta,
+    });
+  }, [externalChecksEnabled, latestResult, deltas.latencyDelta]);
 
   async function runOneScan(label = "scan") {
     const online = typeof navigator.onLine === "boolean" ? navigator.onLine : true;
     const networkHint = getNetworkHint();
 
+    // Privacy mode output
     if (!externalChecksEnabled) {
       return {
         label,
@@ -695,66 +532,46 @@ export default function NetworkMedic() {
         networkHint,
         latency: {
           google204: null,
-          cloudflare: null,
+          cfTrace: null,
+          cfHome: null,
           bestMs: null,
           worstMs: null,
-          note: "Privacy Mode is ON: external probes are disabled.",
+          note: "External diagnostics are disabled.",
         },
-        captive: {
-          suspected: null,
-          note: "Privacy Mode is ON: captive portal check is disabled.",
-        },
-        dns: {
-          ok: null,
-          note: "Privacy Mode is ON: DNS check is disabled.",
-        },
+        captive: { suspected: null, note: "Disabled (Privacy Mode)." },
+        dns: { ok: null, note: "Disabled (Privacy Mode)." },
+        doh: null,
       };
     }
 
-    // Latency probes (best-effort)
+    // 3 probes: google204 + cloudflare trace + cloudflare homepage
     const [g204, cfTrace, cfHome] = await Promise.all([
-  timedFetch(ENDPOINTS.google204, 2500),
-  timedFetch(ENDPOINTS.cfTrace, 2500),
-  timedFetch(ENDPOINTS.cfHome, 2500),
-]);
+      timedFetch(ENDPOINTS.google204, 2500),
+      timedFetch(ENDPOINTS.cfTrace, 2500),
+      timedFetch(ENDPOINTS.cfHome, 2500),
+    ]);
 
-const latencies = [g204, cfTrace, cfHome]
-  .filter((x) => x && typeof x.ms === "number")
-  .map((x) => x.ms);
+    const samples = [g204?.ms, cfTrace?.ms, cfHome?.ms].filter((v) => typeof v === "number");
+    const bestMs = samples.length ? Math.min(...samples) : null;
+    const worstMs = samples.length ? Math.max(...samples) : null;
 
-const bestMs = latencies.length ? Math.min(...latencies) : null;
-const worstMs = latencies.length ? Math.max(...latencies) : null;
-
-    const bestMs = Math.min(g204.ms, cf.ms);
-    const worstMs = Math.max(g204.ms, cf.ms);
-
-    // Captive portal probe (best-effort)
+    // Captive portal best-effort: if online and some probe works, but gstatic204 is very slow/errors
     const captiveProbe = await timedFetch(ENDPOINTS.gstatic204, 2500);
+    const transportOk = [g204, cfTrace, cfHome].some((p) => p?.ok);
+    const captiveSuspected = online && transportOk && (captiveProbe.ok === false || captiveProbe.ms >= 1800);
 
-    // If online and one probe completes but captive probe is very slow or errors, suspect captive
-    const captiveSuspected =
-      online &&
-      (captiveProbe.ok === false || captiveProbe.ms >= 1800) &&
-      (g204.ok || cf.ok);
+    // DNS heuristic:
+    // - Domain evidence: google204 or cloudflare.com succeeded
+    // - Transport evidence: any probe completed
+    const domainOk = Boolean(g204?.ok || cfHome?.ok);
+    const dnsLikelyBroken = transportOk && !domainOk;
 
-    // DNS heuristic: if name probe errors but IP-ish probe completes, suspect DNS/APN/VPN/Private DNS
-    // Transport looks OK if ANY probe worked
-const transportOk = [g204, cfTrace, cfHome].some((p) => p?.ok);
-
-// Domain reachability evidence (2 domains)
-const domainOk = g204?.ok || cfHome?.ok;
-
-// DNS is suspected only when transport OK but domains not OK
-const dnsLikelyBroken = transportOk && !domainOk;
-
-    // DoH best-effort (often opaque/blocked)
-    const doh = await timedFetch(ENDPOINTS.dohCloudflare, 2500, {
-      Accept: "application/dns-json",
-    });
+    // DoH best-effort (may be opaque/blocked)
+    const doh = await timedFetch(ENDPOINTS.dohCloudflare, 2500, { Accept: "application/dns-json" });
 
     const dnsOk = !dnsLikelyBroken;
     const dnsNote = dnsLikelyBroken
-      ? "Transport seems reachable but domains fail — DNS/APN/VPN/Private DNS likely."
+      ? "Transport reachable but domains fail — DNS/APN/VPN/Private DNS likely."
       : doh.ok
         ? "DNS resolution appears OK (best effort)."
         : "DNS looks OK, but DoH probe was inconclusive (blocked/opaque).";
@@ -766,41 +583,28 @@ const dnsLikelyBroken = transportOk && !domainOk;
       networkHint,
       latency: {
         google204: g204,
-        cloudflare: cfTrace,
-        cfHome, 
+        cfTrace,
+        cfHome,
         bestMs,
         worstMs,
         note:
-          bestMs >= 900
+          bestMs != null && bestMs >= 900
             ? "Very high latency — likely congestion or stalled session."
-            : bestMs >= 450
+            : bestMs != null && bestMs >= 450
               ? "Elevated latency — possible congestion."
               : "Latency looks normal.",
       },
       captive: {
         suspected: captiveSuspected,
-        note: captiveSuspected
-          ? "Possible Wi-Fi login intercept detected."
-          : "No strong captive portal signals.",
+        note: captiveSuspected ? "Possible Wi-Fi login intercept detected." : "No strong captive portal signals.",
       },
-      dns: {
-        ok: dnsOk,
-        note: dnsNote,
-      },
+      dns: { ok: dnsOk, note: dnsNote },
       doh,
     };
   }
 
   async function runScanFlow() {
     if (stage === "scanning") return;
-
-    const steps = [
-      "Initializing",
-      "Testing latency",
-      "Checking captive portal",
-      "Verifying DNS",
-      "Compiling diagnosis",
-    ];
 
     setStage("scanning");
     setProgress(0);
@@ -811,11 +615,10 @@ const dnsLikelyBroken = transportOk && !domainOk;
       networkHint: getNetworkHint(),
     });
 
-    const progressTick = () =>
-      setProgress((p) => clamp(p + 1, 0, steps.length));
+    const steps = ["Initializing", "Testing latency", "Checking captive portal", "Verifying DNS", "Compiling diagnosis"];
 
-    if (timerRef.current) clearInterval(timerRef.current);
-    timerRef.current = setInterval(progressTick, 950);
+    clearProgressTimer();
+    timerRef.current = setInterval(() => setProgress((p) => clamp(p + 1, 0, steps.length)), 950);
 
     startPerfObserver();
 
@@ -824,23 +627,24 @@ const dnsLikelyBroken = transportOk && !domainOk;
       setBaseline(base);
       setAfter(null);
 
-      // Simulated diagnostic sequence (UX)
-      await new Promise((r) => setTimeout(r, 5200));
+      // Keep UI progress alive for a moment (UX)
+      await new Promise((r) => setTimeout(r, 1200));
 
+      clearProgressTimer();
       setProgress(steps.length);
+      stopPerfObserver();
 
-      if (abModeEnabled && externalChecksEnabled) setAbPhase("baselineDone");
-      else setAbPhase("none");
+      if (abModeEnabled && externalChecksEnabled) {
+        setAbPhase("baselineDone");
+      } else {
+        setAbPhase("none");
+      }
 
       setStage("done");
     } catch {
-      setStage("done");
-    } finally {
-      if (timerRef.current) {
-        clearInterval(timerRef.current);
-        timerRef.current = null;
-      }
+      clearProgressTimer();
       stopPerfObserver();
+      setStage("done");
     }
   }
 
@@ -848,22 +652,13 @@ const dnsLikelyBroken = transportOk && !domainOk;
     if (stage === "scanning") return;
     if (!abModeEnabled || !externalChecksEnabled) return;
 
-    const steps = [
-      "Re-checking",
-      "Testing latency",
-      "Checking captive portal",
-      "Verifying DNS",
-      "Comparing results",
-    ];
-
     setStage("scanning");
     setProgress(0);
 
-    const progressTick = () =>
-      setProgress((p) => clamp(p + 1, 0, steps.length));
+    const steps = ["Re-checking", "Testing latency", "Checking captive portal", "Verifying DNS", "Comparing results"];
 
-    if (timerRef.current) clearInterval(timerRef.current);
-    timerRef.current = setInterval(progressTick, 950);
+    clearProgressTimer();
+    timerRef.current = setInterval(() => setProgress((p) => clamp(p + 1, 0, steps.length)), 950);
 
     startPerfObserver();
 
@@ -871,22 +666,28 @@ const dnsLikelyBroken = transportOk && !domainOk;
       const aft = await runOneScan("After Reset");
       setAfter(aft);
 
-      // Simulated diagnostic sequence (UX)
-      await new Promise((r) => setTimeout(r, 5200));
+      await new Promise((r) => setTimeout(r, 900));
 
+      clearProgressTimer();
       setProgress(steps.length);
+      stopPerfObserver();
+
       setAbPhase("afterDone");
       setStage("done");
     } catch {
-      setStage("done");
-    } finally {
-      if (timerRef.current) {
-        clearInterval(timerRef.current);
-        timerRef.current = null;
-      }
+      clearProgressTimer();
       stopPerfObserver();
+      setStage("done");
     }
   }
+
+  const scanStepsLabel =
+    stage === "scanning"
+      ? ["Initializing", "Testing latency", "Checking captive portal", "Verifying DNS", "Compiling diagnosis"][Math.max(0, Math.min(4, progress - 1))] ||
+        "Starting"
+      : "Ready";
+
+  const showAfterButton = abModeEnabled && externalChecksEnabled && abPhase === "baselineDone";
 
   const statusCardTone =
     health.level === "green"
@@ -895,26 +696,7 @@ const dnsLikelyBroken = transportOk && !domainOk;
         ? "from-amber-500/12 via-amber-500/6 to-transparent"
         : "from-rose-500/12 via-rose-500/6 to-transparent";
 
-  const statusRing =
-    health.level === "green"
-      ? "ring-emerald-500/30"
-      : health.level === "amber"
-        ? "ring-amber-500/30"
-        : "ring-rose-500/30";
-
-  const scanStepsLabel =
-    stage === "scanning"
-      ? ([
-          "Initializing",
-          "Testing latency",
-          "Checking captive portal",
-          "Verifying DNS",
-          "Compiling diagnosis",
-        ][Math.max(0, Math.min(4, progress - 1))] || "Starting")
-      : "Ready";
-
-  const showAfterButton =
-    abModeEnabled && externalChecksEnabled && abPhase === "baselineDone";
+  const statusRing = health.level === "green" ? "ring-emerald-500/30" : health.level === "amber" ? "ring-amber-500/30" : "ring-rose-500/30";
 
   return (
     <div className="min-h-screen bg-zinc-950 text-zinc-100">
@@ -931,9 +713,7 @@ const dnsLikelyBroken = transportOk && !domainOk;
                 <Network className="h-5 w-5 text-zinc-200" />
               </div>
               <div>
-                <div className="text-lg font-extrabold tracking-tight">
-                  {BRAND.name}
-                </div>
+                <div className="text-lg font-extrabold tracking-tight">{BRAND.name}</div>
                 <div className="text-xs text-zinc-400">{BRAND.tagline}</div>
               </div>
             </div>
@@ -941,9 +721,7 @@ const dnsLikelyBroken = transportOk && !domainOk;
           <div className="flex flex-col items-end gap-2">
             <Badge level={health.level} label={health.label} />
             <ReliabilityBadge level={reliability.level} label={reliability.label} />
-            <div className="text-[11px] text-zinc-500">
-              Works with all mobile carriers worldwide
-            </div>
+            <div className="text-[11px] text-zinc-500">Works with mobile carriers worldwide</div>
           </div>
         </div>
 
@@ -972,6 +750,7 @@ const dnsLikelyBroken = transportOk && !domainOk;
             hint="OFF by default. When enabled, your browser makes outbound HTTPS requests to public endpoints for connectivity checks. This app stores nothing."
             icon={Lock}
           />
+
           <Toggle
             enabled={abModeEnabled}
             onChange={(v) => {
@@ -980,7 +759,7 @@ const dnsLikelyBroken = transportOk && !domainOk;
               setAfter(null);
             }}
             label="A/B Scan Mode (Before/After Airplane Mode)"
-            hint="Baseline scan, then re-scan after airplane mode. Helps detect ‘stalled session’ issues without accessing sensitive device data."
+            hint="Baseline scan, then re-scan after airplane mode. Helps detect stalled data sessions without accessing sensitive device data."
             icon={Layers}
           />
 
@@ -988,16 +767,10 @@ const dnsLikelyBroken = transportOk && !domainOk;
             <div className="flex items-start gap-2">
               <Info className="mt-0.5 h-4 w-4 text-zinc-300" />
               <div>
-                <div className="font-semibold text-zinc-200">
-                  PDPA Notice (Plain-English)
-                </div>
+                <div className="font-semibold text-zinc-200">PDPA Notice (Plain-English)</div>
                 <div className="mt-1 leading-relaxed">
-                  This app runs entirely on your device. It does not create
-                  accounts, collect names, phone numbers, location, or
-                  identifiers. If you enable External Diagnostics, your device
-                  will send normal web requests to public endpoints; those
-                  services may log network metadata (IP/user-agent) as per their
-                  policies.
+                  This app runs on your device. It does not create accounts or collect identifiers. If you enable External Diagnostics, your device will send normal web
+                  requests to public endpoints; those services may log network metadata (IP/user-agent) as per their policies.
                 </div>
               </div>
             </div>
@@ -1007,12 +780,9 @@ const dnsLikelyBroken = transportOk && !domainOk;
             <div className="flex items-start gap-2">
               <Wifi className="mt-0.5 h-4 w-4 text-zinc-200" />
               <div>
-                <div className="font-semibold text-zinc-100">
-                  For mobile data testing
-                </div>
+                <div className="font-semibold text-zinc-100">For mobile data testing</div>
                 <div className="mt-1 text-zinc-400">
-                  Turn <span className="text-zinc-200">Wi-Fi OFF</span> before
-                  scanning. Captive Wi-Fi often mimics “no data” symptoms.
+                  Turn <span className="text-zinc-200">Wi-Fi OFF</span> before scanning. Captive Wi-Fi often mimics “no data” symptoms.
                 </div>
               </div>
             </div>
@@ -1025,15 +795,9 @@ const dnsLikelyBroken = transportOk && !domainOk;
         >
           <div className="flex items-start justify-between gap-4">
             <div>
-              <div className="text-xs font-semibold tracking-wide text-zinc-400">
-                SYSTEM HEALTH
-              </div>
-              <div className="mt-1 text-2xl font-black tracking-tight">
-                {health.title}
-              </div>
-              <div className="mt-2 text-sm leading-relaxed text-zinc-300">
-                {health.detail}
-              </div>
+              <div className="text-xs font-semibold tracking-wide text-zinc-400">SYSTEM HEALTH</div>
+              <div className="mt-1 text-2xl font-black tracking-tight">{health.title}</div>
+              <div className="mt-2 text-sm leading-relaxed text-zinc-300">{health.detail}</div>
             </div>
             <div className="rounded-2xl bg-white/5 p-3 ring-1 ring-white/10">
               <HealthIcon className="h-6 w-6" />
@@ -1044,30 +808,18 @@ const dnsLikelyBroken = transportOk && !domainOk;
             <div className="rounded-2xl bg-white/5 p-3 ring-1 ring-white/10">
               <div className="text-[11px] text-zinc-500">Best Latency</div>
               <div className="mt-1 flex items-baseline gap-1">
-                <span className="text-lg font-extrabold">
-                  {latestResult?.latency?.bestMs ?? "—"}
-                </span>
+                <span className="text-lg font-extrabold">{latestResult?.latency?.bestMs ?? "—"}</span>
                 <span className="text-xs text-zinc-500">ms</span>
               </div>
             </div>
             <div className="rounded-2xl bg-white/5 p-3 ring-1 ring-white/10">
               <div className="text-[11px] text-zinc-500">DNS</div>
-              <div className="mt-1 text-lg font-extrabold">
-                {latestResult?.dns?.ok == null
-                  ? "—"
-                  : latestResult.dns.ok
-                    ? "OK"
-                    : "BAD"}
-              </div>
+              <div className="mt-1 text-lg font-extrabold">{latestResult?.dns?.ok == null ? "—" : latestResult.dns.ok ? "OK" : "BAD"}</div>
             </div>
             <div className="rounded-2xl bg-white/5 p-3 ring-1 ring-white/10">
               <div className="text-[11px] text-zinc-500">Captive</div>
               <div className="mt-1 text-lg font-extrabold">
-                {latestResult?.captive?.suspected == null
-                  ? "—"
-                  : latestResult.captive.suspected
-                    ? "YES"
-                    : "NO"}
+                {latestResult?.captive?.suspected == null ? "—" : latestResult.captive.suspected ? "YES" : "NO"}
               </div>
             </div>
           </div>
@@ -1079,62 +831,40 @@ const dnsLikelyBroken = transportOk && !domainOk;
           ) : null}
         </div>
 
-{/* Primary actions */}
-<div className="mb-4 space-y-3">
+        {/* Primary actions */}
+        <div className="mb-4 space-y-3">
+          <button
+            onClick={runScanFlow}
+            className="w-full rounded-2xl bg-white text-zinc-950 shadow-lg shadow-white/10 ring-1 ring-white/20 active:scale-[0.99]"
+          >
+            <div className="flex items-center justify-center gap-3 px-4 py-4">
+              {stage === "scanning" ? <Loader2 className="h-5 w-5 animate-spin" /> : <Wrench className="h-5 w-5" />}
+              <div className="text-base font-extrabold tracking-tight">{stage === "scanning" ? "Running Scan…" : "Run Scan"}</div>
+            </div>
+          </button>
 
-  {/* Run Scan Button */}
-  <button
-    onClick={runScanFlow}
-    className="w-full rounded-2xl bg-white text-zinc-950 shadow-lg shadow-white/10 ring-1 ring-white/20 active:scale-[0.99]"
-  >
-    <div className="flex items-center justify-center gap-3 px-4 py-4">
-      {stage === "scanning" ? (
-        <Loader2 className="h-5 w-5 animate-spin" />
-      ) : (
-        <Wrench className="h-5 w-5" />
-      )}
-      <div className="text-base font-extrabold tracking-tight">
-        {stage === "scanning" ? "Running Scan…" : "Run Scan"}
-      </div>
-    </div>
-  </button>
-
-  {/* Limited Mode Warning */}
-  {!externalChecksEnabled && (
-    <div className="rounded-2xl border border-amber-500/30 bg-amber-500/10 p-3 text-xs text-amber-200 ring-1 ring-amber-500/20">
-      <div className="flex items-start gap-2">
-        <Lock className="mt-0.5 h-4 w-4" />
-        <div>
-          External Diagnostics is <span className="font-semibold">OFF</span>.
-          Results are limited.
-          <br />
-          Enable it above for full latency, DNS and captive portal testing.
-        </div>
-      </div>
-    </div>
-  )}
-
-</div>
+          {!externalChecksEnabled ? (
+            <div className="rounded-2xl border border-amber-500/30 bg-amber-500/10 p-3 text-xs text-amber-200 ring-1 ring-amber-500/20">
+              <div className="flex items-start gap-2">
+                <Lock className="mt-0.5 h-4 w-4" />
+                <div>
+                  <div className="font-semibold">Limited Mode</div>
+                  <div className="mt-1 text-amber-100/80">Enable External Diagnostics above for latency/DNS/captive checks.</div>
+                </div>
+              </div>
+            </div>
+          ) : null}
 
           {showAfterButton ? (
             <div className="rounded-2xl border border-white/10 bg-white/5 p-3 ring-1 ring-white/10">
-              <div className="mb-2 text-sm font-semibold text-zinc-100">
-                A/B Step 2 — After Airplane Mode
-              </div>
+              <div className="mb-2 text-sm font-semibold text-zinc-100">A/B Step 2 — After Airplane Mode</div>
               <div className="text-xs text-zinc-400">
-                Toggle airplane mode for{" "}
-                <span className="text-zinc-200">10 seconds</span>, then tap
-                “Re-Scan After Reset”.
+                Toggle airplane mode for <span className="text-zinc-200">10 seconds</span>, then tap “Re-Scan After Reset”.
               </div>
-              <button
-                onClick={runAfterFixFlow}
-                className="mt-3 w-full rounded-2xl bg-zinc-100 text-zinc-950 ring-1 ring-white/20 active:scale-[0.99]"
-              >
+              <button onClick={runAfterFixFlow} className="mt-3 w-full rounded-2xl bg-zinc-100 text-zinc-950 ring-1 ring-white/20 active:scale-[0.99]">
                 <div className="flex items-center justify-center gap-3 px-4 py-3">
                   <Layers className="h-5 w-5" />
-                  <div className="text-sm font-extrabold tracking-tight">
-                    Re-Scan After Reset
-                  </div>
+                  <div className="text-sm font-extrabold tracking-tight">Re-Scan After Reset</div>
                 </div>
               </button>
             </div>
@@ -1146,108 +876,65 @@ const dnsLikelyBroken = transportOk && !domainOk;
           <Card
             title="A/B Comparison"
             icon={Layers}
-            help="Shows whether airplane mode ‘reset’ improved things. Big improvement often means a stalled data session."
-            right={
-              baseline && after ? (
-                <span className="text-xs text-zinc-400">delta view</span>
-              ) : null
-            }
+            help="Shows whether airplane mode reset improved things. Big improvement often means a stalled data session."
+            right={baseline && after ? <span className="text-xs text-zinc-400">delta view</span> : null}
           >
-            <div className="space-y-3">
-              {!baseline ? (
-                <div className="text-sm text-zinc-400">
-                  Run a scan to generate a baseline.
-                </div>
-              ) : (
-                <div className="rounded-2xl bg-white/5 p-3 ring-1 ring-white/10">
-                  <div className="grid grid-cols-3 gap-3">
-                    <div>
-                      <div className="text-[11px] text-zinc-500">Baseline</div>
-                      <div className="mt-1 text-sm font-bold text-zinc-100">
-                        {baseline.latency.bestMs != null
-                          ? `${baseline.latency.bestMs} ms`
-                          : "—"}
-                      </div>
-                    </div>
-                    <div>
-                      <div className="text-[11px] text-zinc-500">After Reset</div>
-                      <div className="mt-1 text-sm font-bold text-zinc-100">
-                        {after?.latency?.bestMs != null
-                          ? `${after.latency.bestMs} ms`
-                          : "—"}
-                      </div>
-                    </div>
-                    <div>
-                      <div className="text-[11px] text-zinc-500">Δ Latency</div>
-                      <div
-                        className={`mt-1 text-sm font-black ${
-                          deltas.latencyDelta == null
-                            ? "text-zinc-100"
-                            : deltas.latencyDelta <= -250
-                              ? "text-emerald-300"
-                              : deltas.latencyDelta >= 250
-                                ? "text-rose-200"
-                                : "text-amber-200"
-                        }`}
-                      >
-                        {formatDeltaMs(deltas.latencyDelta)}
-                      </div>
-                    </div>
+            {!baseline ? (
+              <div className="text-sm text-zinc-400">Run a scan to generate a baseline.</div>
+            ) : (
+              <div className="rounded-2xl bg-white/5 p-3 ring-1 ring-white/10">
+                <div className="grid grid-cols-3 gap-3">
+                  <div>
+                    <div className="text-[11px] text-zinc-500">Baseline</div>
+                    <div className="mt-1 text-sm font-bold text-zinc-100">{baseline.latency?.bestMs != null ? `${baseline.latency.bestMs} ms` : "—"}</div>
                   </div>
-
-                  <div className="mt-3 grid grid-cols-2 gap-3 text-xs text-zinc-400">
-                    <div className="rounded-xl bg-white/5 p-2 ring-1 ring-white/10">
-                      <div className="font-semibold text-zinc-200">DNS changed</div>
-                      <div className="mt-1">
-                        {deltas.dnsChanged == null
-                          ? "—"
-                          : deltas.dnsChanged
-                            ? "Yes"
-                            : "No"}
-                      </div>
-                    </div>
-                    <div className="rounded-xl bg-white/5 p-2 ring-1 ring-white/10">
-                      <div className="font-semibold text-zinc-200">Captive changed</div>
-                      <div className="mt-1">
-                        {deltas.captiveChanged == null
-                          ? "—"
-                          : deltas.captiveChanged
-                            ? "Yes"
-                            : "No"}
-                      </div>
-                    </div>
+                  <div>
+                    <div className="text-[11px] text-zinc-500">After Reset</div>
+                    <div className="mt-1 text-sm font-bold text-zinc-100">{after?.latency?.bestMs != null ? `${after.latency.bestMs} ms` : "—"}</div>
                   </div>
-
-                  <div className="mt-3 text-xs text-zinc-400">
-                    Tip: Big improvement after reset → likely a{" "}
-                    <span className="text-zinc-200">stalled session</span>. No
-                    improvement → likely{" "}
-                    <span className="text-zinc-200">congestion/coverage</span>.
+                  <div>
+                    <div className="text-[11px] text-zinc-500">Δ Latency</div>
+                    <div
+                      className={`mt-1 text-sm font-black ${
+                        deltas.latencyDelta == null
+                          ? "text-zinc-100"
+                          : deltas.latencyDelta <= -250
+                            ? "text-emerald-300"
+                            : deltas.latencyDelta >= 250
+                              ? "text-rose-200"
+                              : "text-amber-200"
+                      }`}
+                    >
+                      {formatDeltaMs(deltas.latencyDelta)}
+                    </div>
                   </div>
                 </div>
-              )}
-            </div>
+
+                <div className="mt-3 grid grid-cols-2 gap-3 text-xs text-zinc-400">
+                  <div className="rounded-xl bg-white/5 p-2 ring-1 ring-white/10">
+                    <div className="font-semibold text-zinc-200">DNS changed</div>
+                    <div className="mt-1">{deltas.dnsChanged == null ? "—" : deltas.dnsChanged ? "Yes" : "No"}</div>
+                  </div>
+                  <div className="rounded-xl bg-white/5 p-2 ring-1 ring-white/10">
+                    <div className="font-semibold text-zinc-200">Captive changed</div>
+                    <div className="mt-1">{deltas.captiveChanged == null ? "—" : deltas.captiveChanged ? "Yes" : "No"}</div>
+                  </div>
+                </div>
+
+                <div className="mt-3 text-xs text-zinc-400">
+                  Tip: Big improvement after reset → likely a <span className="text-zinc-200">stalled session</span>. No improvement → likely{" "}
+                  <span className="text-zinc-200">congestion/coverage</span>.
+                </div>
+              </div>
+            )}
           </Card>
 
-          <Card
-            title="Latency (Ping)"
-            icon={Timer}
-            help="Measures how long it takes to reach the internet. High latency can feel like slow/no data even with signal bars."
-            right={
-              latestResult?.latency?.bestMs != null ? (
-                <span className="text-xs text-zinc-400">best of 2 probes</span>
-              ) : null
-            }
-          >
+          <Card title="Latency (Ping)" icon={Timer} help="Measures how long it takes to reach the internet (timed fetch; no ICMP ping in browsers)." right={<span className="text-xs text-zinc-400">best of 3 probes</span>}>
             <div className="space-y-3">
               <MetricRow
                 icon={Globe}
                 label="google.com (204 probe)"
-                value={
-                  latestResult?.latency?.google204
-                    ? `${latestResult.latency.google204.ms} ms`
-                    : "—"
-                }
+                value={latestResult?.latency?.google204 ? `${latestResult.latency.google204.ms} ms` : "—"}
                 sub={
                   latestResult?.latency?.google204
                     ? latestResult.latency.google204.ok
@@ -1273,129 +960,107 @@ const dnsLikelyBroken = transportOk && !domainOk;
                       : "bad"
                 }
               />
+
               <MetricRow
                 icon={Network}
                 label="Cloudflare (secondary probe)"
-                value={
-                  latestResult?.latency?.cloudflare
-                    ? `${latestResult.latency.cloudflare.ms} ms`
-                    : "—"
-                }
+                value={latestResult?.latency?.cfTrace ? `${latestResult.latency.cfTrace.ms} ms` : "—"}
                 sub={
-                  latestResult?.latency?.cloudflare
-                    ? latestResult.latency.cloudflare.ok
-                      ? latestResult.latency.cloudflare.opaque
+                  latestResult?.latency?.cfTrace
+                    ? latestResult.latency.cfTrace.ok
+                      ? latestResult.latency.cfTrace.opaque
                         ? "Probe completed (opaque response)"
                         : "Probe completed"
-                      : `Failed (${latestResult.latency.cloudflare.error})`
+                      : `Failed (${latestResult.latency.cfTrace.error})`
                     : externalChecksEnabled
                       ? "Not tested"
                       : "Disabled (Privacy Mode)"
                 }
                 status={
-                  !latestResult?.latency?.cloudflare
+                  !latestResult?.latency?.cfTrace
                     ? externalChecksEnabled
                       ? "neutral"
                       : "warn"
-                    : latestResult.latency.cloudflare.ok
-                      ? latestResult.latency.cloudflare.ms >= 900
+                    : latestResult.latency.cfTrace.ok
+                      ? latestResult.latency.cfTrace.ms >= 900
                         ? "bad"
-                        : latestResult.latency.cloudflare.ms >= 450
+                        : latestResult.latency.cfTrace.ms >= 450
                           ? "warn"
                           : "good"
                       : "bad"
                 }
               />
+
+              <MetricRow
+                icon={Globe}
+                label="cloudflare.com (domain probe)"
+                value={latestResult?.latency?.cfHome ? `${latestResult.latency.cfHome.ms} ms` : "—"}
+                sub={
+                  latestResult?.latency?.cfHome
+                    ? latestResult.latency.cfHome.ok
+                      ? latestResult.latency.cfHome.opaque
+                        ? "Probe completed (opaque response)"
+                        : "Probe completed"
+                      : `Failed (${latestResult.latency.cfHome.error})`
+                    : externalChecksEnabled
+                      ? "Not tested"
+                      : "Disabled (Privacy Mode)"
+                }
+                status={
+                  !latestResult?.latency?.cfHome
+                    ? externalChecksEnabled
+                      ? "neutral"
+                      : "warn"
+                    : latestResult.latency.cfHome.ok
+                      ? latestResult.latency.cfHome.ms >= 900
+                        ? "bad"
+                        : latestResult.latency.cfHome.ms >= 450
+                          ? "warn"
+                          : "good"
+                      : "bad"
+                }
+              />
+
               <div className="rounded-2xl bg-white/5 p-3 text-xs text-zinc-400 ring-1 ring-white/10">
                 <div className="flex items-start gap-2">
                   <CircleHelp className="mt-0.5 h-4 w-4 text-zinc-300" />
-                  <div>
-                    {latestResult?.latency?.note ||
-                      "Latency is approximated via fetch timing (no true ICMP ping in browsers)."}
-                  </div>
+                  <div>{latestResult?.latency?.note || "Latency is approximated via fetch timing."}</div>
                 </div>
               </div>
             </div>
           </Card>
 
-          <Card
-            title="Captive Portal Check"
-            icon={ShieldAlert}
-            help="Detects Wi-Fi networks that block the internet until you sign in (common on public Wi-Fi)."
-          >
+          <Card title="Captive Portal Check" icon={ShieldAlert} help="Detects Wi-Fi networks that block the internet until you sign in (common on public Wi-Fi).">
             <div className="space-y-3">
               <MetricRow
                 icon={WifiOff}
                 label="Login-required intercept"
-                value={
-                  latestResult?.captive?.suspected == null
-                    ? "—"
-                    : latestResult.captive.suspected
-                      ? "Suspected"
-                      : "Not detected"
-                }
-                sub={
-                  latestResult?.captive?.note ||
-                  (externalChecksEnabled ? "Not tested" : "Disabled (Privacy Mode)")
-                }
+                value={latestResult?.captive?.suspected == null ? "—" : latestResult.captive.suspected ? "Suspected" : "Not detected"}
+                sub={latestResult?.captive?.note || (externalChecksEnabled ? "Not tested" : "Disabled (Privacy Mode)")}
                 status={
-                  latestResult?.captive?.suspected == null
-                    ? externalChecksEnabled
-                      ? "neutral"
-                      : "warn"
-                    : latestResult.captive.suspected
-                      ? "warn"
-                      : "good"
+                  latestResult?.captive?.suspected == null ? (externalChecksEnabled ? "neutral" : "warn") : latestResult.captive.suspected ? "warn" : "good"
                 }
               />
-              <div className="rounded-2xl bg-white/5 p-3 text-xs text-zinc-400 ring-1 ring-white/10">
-                Tip: If suspected, turn off Wi-Fi and retry the scan.
-              </div>
+              <div className="rounded-2xl bg-white/5 p-3 text-xs text-zinc-400 ring-1 ring-white/10">Tip: If suspected, turn off Wi-Fi and retry the scan.</div>
             </div>
           </Card>
 
-          <Card
-            title="DNS Health"
-            icon={Globe}
-            help="DNS turns website names (like google.com) into IP addresses. If DNS breaks, apps may say ‘no internet’ even with signal."
-          >
+          <Card title="DNS Health" icon={Globe} help="DNS turns names (like google.com) into IPs. If DNS breaks, apps may say ‘no internet’ even with signal.">
             <div className="space-y-3">
               <MetricRow
                 icon={Globe}
                 label="Domain resolution"
-                value={
-                  latestResult?.dns?.ok == null
-                    ? "—"
-                    : latestResult.dns.ok
-                      ? "OK"
-                      : "Broken"
-                }
-                sub={
-                  latestResult?.dns?.note ||
-                  (externalChecksEnabled ? "Not tested" : "Disabled (Privacy Mode)")
-                }
-                status={
-                  latestResult?.dns?.ok == null
-                    ? externalChecksEnabled
-                      ? "neutral"
-                      : "warn"
-                    : latestResult.dns.ok
-                      ? "good"
-                      : "bad"
-                }
+                value={latestResult?.dns?.ok == null ? "—" : latestResult.dns.ok ? "OK" : "Broken"}
+                sub={latestResult?.dns?.note || (externalChecksEnabled ? "Not tested" : "Disabled (Privacy Mode)")}
+                status={latestResult?.dns?.ok == null ? (externalChecksEnabled ? "neutral" : "warn") : latestResult.dns.ok ? "good" : "bad"}
               />
               <div className="rounded-2xl bg-white/5 p-3 text-xs text-zinc-400 ring-1 ring-white/10">
-                If DNS is broken, check APN and disable VPN/Private DNS.
+                If DNS is broken: disable VPN/Private DNS, verify APN, toggle airplane mode, re-scan.
               </div>
             </div>
           </Card>
 
-          <Card
-            title="Device Factors"
-            icon={Gauge}
-            help="Best-effort signals from your browser (not hardware identifiers). Helps spot data saver, throttling, or a busy phone."
-            right={netHint.supported ? <span className="text-xs text-zinc-400">best-effort</span> : null}
-          >
+          <Card title="Device Factors" icon={Gauge} help="Best-effort signals from your browser (not hardware identifiers). Helps spot data saver or a busy phone.">
             <div className="space-y-3">
               <MetricRow
                 icon={Signal}
@@ -1418,15 +1083,6 @@ const dnsLikelyBroken = transportOk && !domainOk;
                 sub="Time spent on long tasks while scanning (high values may mean CPU/thermal load)."
                 status={longTaskMs >= 1500 ? "warn" : "good"}
               />
-
-              <div className="rounded-2xl bg-white/5 p-3 text-xs text-zinc-400 ring-1 ring-white/10">
-                <div className="font-semibold text-zinc-200">Quick meaning</div>
-                <ul className="mt-2 list-disc space-y-1 pl-5">
-                  <li>Save-Data ON → disable for accurate tests.</li>
-                  <li>High Device Busy → close heavy apps, retry, or reboot.</li>
-                  <li>Healthy scan but apps fail → check VPN/Private DNS/data saver.</li>
-                </ul>
-              </div>
             </div>
           </Card>
 
@@ -1450,78 +1106,51 @@ const dnsLikelyBroken = transportOk && !domainOk;
           >
             <div className="space-y-3">
               <div className="rounded-2xl bg-white/5 p-3 ring-1 ring-white/10">
-                <div className="text-xs font-semibold text-zinc-300">
-                  Detected / Selected
-                </div>
-                <div className="mt-1 text-lg font-extrabold">
-                  {carrierInfo.name}
-                </div>
+                <div className="text-xs font-semibold text-zinc-300">Detected / Selected</div>
+                <div className="mt-1 text-lg font-extrabold">{carrierInfo.name}</div>
                 <div className="mt-2 text-sm text-zinc-300">
-                  <span className="text-zinc-400">APN:</span>{" "}
-                  <span className="font-bold text-zinc-100">
-                    {carrierInfo.apn}
-                  </span>
+                  <span className="text-zinc-400">APN:</span> <span className="font-bold text-zinc-100">{carrierInfo.apn}</span>
                 </div>
-                <div className="mt-2 text-xs text-zinc-400">
-                  {carrierInfo.notes}
-                </div>
+                <div className="mt-2 text-xs text-zinc-400">{carrierInfo.notes}</div>
               </div>
 
               <div className="rounded-2xl bg-white/5 p-3 text-xs text-zinc-400 ring-1 ring-white/10">
-                <div className="mb-2 text-xs font-semibold text-zinc-300">
-                  Where to change APN
-                </div>
+                <div className="mb-2 text-xs font-semibold text-zinc-300">Where to change APN</div>
                 <div className="space-y-1">
                   <div>
-                    <span className="font-semibold text-zinc-200">iPhone:</span>{" "}
-                    Settings → Mobile Service → Mobile Data Network
+                    <span className="font-semibold text-zinc-200">iPhone:</span> Settings → Mobile Service → Mobile Data Network
                   </div>
                   <div>
-                    <span className="font-semibold text-zinc-200">Android:</span>{" "}
-                    Settings → Network & Internet → SIMs → Access Point Names
+                    <span className="font-semibold text-zinc-200">Android:</span> Settings → Network & Internet → SIMs → Access Point Names
                   </div>
                 </div>
               </div>
             </div>
           </Card>
 
+          {/* Diagnosis + Auto suggestion */}
           <div className="rounded-3xl border border-white/10 bg-white/5 p-4 ring-1 ring-white/10">
-  <div className="flex items-start justify-between gap-4">
-    <div>
-      <div className="text-xs font-semibold tracking-wide text-zinc-400">DIAGNOSIS</div>
+            <div className="flex items-start justify-between gap-4">
+              <div className="min-w-0">
+                <div className="text-xs font-semibold tracking-wide text-zinc-400">DIAGNOSIS</div>
+                <div className="mt-1 text-xl font-black tracking-tight">{health.title}</div>
+                <div className="mt-2 text-sm leading-relaxed text-zinc-300">{health.detail}</div>
 
-      <div className="mt-1 text-xl font-black tracking-tight">{diagnosis.label}</div>
+                {autoSuggestion ? (
+                  <div className="mt-3 rounded-xl bg-white/5 p-3 text-xs text-zinc-300 ring-1 ring-white/10">
+                    <div className="font-semibold text-zinc-200">Auto suggestion</div>
+                    <div className="mt-1 text-zinc-400">{autoSuggestion}</div>
+                  </div>
+                ) : null}
+              </div>
 
-      <div className="mt-2 text-sm leading-relaxed text-zinc-300">{diagnosis.reason}</div>
-
-      {diagnosis.bullets?.length ? (
-        <ul className="mt-3 list-disc space-y-1 pl-5 text-sm text-zinc-300">
-          {diagnosis.bullets.map((b) => (
-            <li key={b}>{b}</li>
-          ))}
-        </ul>
-      ) : null}
-
-      {externalChecksEnabled &&
-        latestResult?.latency?.bestMs != null &&
-        latestResult.latency.bestMs >= 900 && (
-          <div className="mt-3 rounded-xl bg-white/5 p-3 text-xs text-zinc-300 ring-1 ring-white/10">
-            <div className="font-semibold text-zinc-200">Auto Suggestion</div>
-            <div className="mt-1 text-zinc-400">
-              Latency is extremely high. Try switching to{" "}
-              <span className="text-zinc-200">4G-only</span> temporarily (5G handover can cause stalled sessions),
-              then toggle airplane mode and re-scan.
+              <div className="rounded-2xl bg-white/5 p-3 ring-1 ring-white/10">
+                <Activity className="h-6 w-6" />
+              </div>
             </div>
           </div>
-        )}
-    </div>
 
-    <div className="rounded-2xl bg-white/5 p-3 ring-1 ring-white/10">
-      <Activity className="h-6 w-6" />
-    </div>
-  </div>
-</div>
-
+          {/* Quick Fix */}
           <div className="rounded-3xl border border-white/10 bg-zinc-950/60 p-4 shadow-[0_0_0_1px_rgba(255,255,255,0.04)]">
             <div className="mb-3 flex items-center gap-2">
               <div className="rounded-xl bg-white/5 p-2 text-zinc-200">
@@ -1529,19 +1158,20 @@ const dnsLikelyBroken = transportOk && !domainOk;
               </div>
               <div className="text-sm font-semibold text-zinc-100">Quick Fix</div>
             </div>
+
             <ol className="space-y-2 text-sm text-zinc-300">
               <li className="flex gap-3">
                 <span className="mt-0.5 inline-flex h-5 w-5 items-center justify-center rounded-lg bg-white/5 text-xs font-bold text-zinc-200 ring-1 ring-white/10">
                   1
                 </span>
-                <span>Toggle Airplane Mode (10 seconds), then retry.</span>
+                <span>Toggle Airplane Mode (10 seconds), then re-scan.</span>
               </li>
               <li className="flex gap-3">
                 <span className="mt-0.5 inline-flex h-5 w-5 items-center justify-center rounded-lg bg-white/5 text-xs font-bold text-zinc-200 ring-1 ring-white/10">
                   2
                 </span>
                 <span>
-                  Check APN (SIMBA: set APN to <b>tpg</b>), then restart mobile data.
+                  Disable VPN / Private DNS / Data Saver, then re-scan. (If SIMBA: set APN to <b>tpg</b>.)
                 </span>
               </li>
               <li className="flex gap-3">
@@ -1553,25 +1183,22 @@ const dnsLikelyBroken = transportOk && !domainOk;
             </ol>
           </div>
 
+          {/* Deploy notes */}
           <div className="rounded-2xl border border-white/10 bg-white/5 p-4 text-xs text-zinc-400 ring-1 ring-white/10">
             <div className="flex items-start gap-2">
               <Lock className="mt-0.5 h-4 w-4 text-zinc-300" />
               <div>
                 <div className="font-semibold text-zinc-200">Security Deploy Notes</div>
                 <div className="mt-1 leading-relaxed">
-                  Deploy with a strict Content Security Policy (CSP) and allowlist
-                  only required endpoints via{" "}
-                  <span className="text-zinc-200">connect-src</span>. If External
-                  Diagnostics is OFF, set{" "}
+                  Deploy with a strict Content Security Policy (CSP) and allowlist only required endpoints via{" "}
+                  <span className="text-zinc-200">connect-src</span>. If External Diagnostics is OFF, set{" "}
                   <span className="text-zinc-200">connect-src 'self'</span>.
                 </div>
               </div>
             </div>
           </div>
 
-          <div className="pb-2 pt-1 text-center text-xs text-zinc-500">
-            Pro-tip: Run scan with Wi-Fi OFF to test true mobile data.
-          </div>
+          <div className="pb-2 pt-1 text-center text-xs text-zinc-500">Pro-tip: Run scan with Wi-Fi OFF to test true mobile data.</div>
         </div>
       </div>
     </div>
