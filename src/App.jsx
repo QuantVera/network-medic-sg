@@ -1046,9 +1046,7 @@ export default function NetworkMedic() {
                 <span className="mt-0.5 inline-flex h-5 w-5 items-center justify-center rounded-lg bg-white/5 text-xs font-bold text-zinc-200 ring-1 ring-white/10">
                   2
                 </span>
-                <span>
-                  Disable VPN / Private DNS / Data Saver, then re-scan. (If SIMBA: set APN to <b>tpg</b>.)
-                </span>
+                <span>Disable VPN / Private DNS / Data Saver, then re-scan. (If SIMBA: set APN to <b>tpg</b>.)</span>
               </li>
               <li className="flex gap-3">
                 <span className="mt-0.5 inline-flex h-5 w-5 items-center justify-center rounded-lg bg-white/5 text-xs font-bold text-zinc-200 ring-1 ring-white/10">

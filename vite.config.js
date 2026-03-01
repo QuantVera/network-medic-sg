@@ -2,21 +2,26 @@ import { defineConfig } from "vite";
 import react from "@vitejs/plugin-react";
 import { VitePWA } from "vite-plugin-pwa";
 
-// Simple build version for debugging + helping you confirm deploy freshness
-const buildVersion = new Date().toISOString();
-
 export default defineConfig({
   plugins: [
     react(),
     VitePWA({
-      // Ensures the registration script checks and updates SW automatically
+      // Inject the SW register script into index.html automatically
+      injectRegister: "auto",
+
+      // When a new SW is available, update in the background and activate ASAP
       registerType: "autoUpdate",
 
-      // Make sure SW is generated (default), and keep it in root scope
-      scope: "/",
-      base: "/",
+      // Helps ensure new SW controls pages quickly
+      workbox: {
+        cleanupOutdatedCaches: true,
+        clientsClaim: true,
+        skipWaiting: true,
 
-      // If you want your icons copied from /public, list them here
+        // IMPORTANT: keep probes live-only
+        runtimeCaching: [],
+      },
+
       includeAssets: [
         "pwa-192x192.png",
         "pwa-512x512.png",
@@ -27,7 +32,7 @@ export default defineConfig({
         name: "Network Medic",
         short_name: "Network Medic",
         description:
-          "Diagnose why mobile data isn't working even with signal bars (privacy-first).",
+          "Diagnose why mobile data isn't working even with signal bars (privacy-first, client-only).",
         theme_color: "#09090b",
         background_color: "#09090b",
         display: "standalone",
@@ -45,33 +50,10 @@ export default defineConfig({
         ],
       },
 
-      // Workbox config: fast updates + no external endpoint caching
-      workbox: {
-        // Important: activate new SW ASAP
-        skipWaiting: true,
-        clientsClaim: true,
-
-        // Prevent stale caches accumulating
-        cleanupOutdatedCaches: true,
-
-        // Keep external diagnostics live-only: DO NOT runtime-cache anything
-        runtimeCaching: [],
-
-        // Optional: avoid caching navigation aggressively
-        // (Cloudflare Pages + PWA can be sticky if you cache HTML)
-        navigateFallback: "/index.html",
-      },
-
-      // Helpful in dev: enables SW in dev if you want to test install/update behavior locally.
-      // If you don't need dev SW, set enabled: false.
+      // During local dev, don't register SW (avoids confusing cache issues)
       devOptions: {
         enabled: false,
       },
     }),
   ],
-
-  // Lets you print app version in UI/console: console.log(__APP_VERSION__)
-  define: {
-    __APP_VERSION__: JSON.stringify(buildVersion),
-  },
 });
