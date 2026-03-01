@@ -804,7 +804,8 @@ export default function NetworkMedic() {
             </div>
           </div>
 
-          <div className="mt-4 grid grid-cols-3 gap-3">
+          <div className="mt-4 grid grid-cols-2 gap-3">
+            {/* Best Latency */}
             <div className="rounded-2xl bg-white/5 p-3 ring-1 ring-white/10">
               <div className="text-[11px] text-zinc-500">Best Latency</div>
               <div className="mt-1 flex items-baseline gap-1">
@@ -812,14 +813,36 @@ export default function NetworkMedic() {
                 <span className="text-xs text-zinc-500">ms</span>
               </div>
             </div>
+
+            {/* Network */}
+            <div className="rounded-2xl bg-white/5 p-3 ring-1 ring-white/10">
+              <div className="text-[11px] text-zinc-500">Network</div>
+              <div className="mt-1 text-lg font-extrabold">
+                {netHint?.supported
+                  ? netHint.effectiveType === "4g"
+                    ? "4G/5G"
+                    : String(netHint.effectiveType || "Unknown").toUpperCase()
+                  : "Unknown"}
+              </div>
+            </div>
+
+            {/* DNS */}
             <div className="rounded-2xl bg-white/5 p-3 ring-1 ring-white/10">
               <div className="text-[11px] text-zinc-500">DNS</div>
-              <div className="mt-1 text-lg font-extrabold">{latestResult?.dns?.ok == null ? "—" : latestResult.dns.ok ? "OK" : "BAD"}</div>
+              <div className="mt-1 text-lg font-extrabold">
+                {latestResult?.dns?.ok == null ? "—" : latestResult.dns.ok ? "OK" : "BAD"}
+              </div>
             </div>
+
+            {/* Captive */}
             <div className="rounded-2xl bg-white/5 p-3 ring-1 ring-white/10">
               <div className="text-[11px] text-zinc-500">Captive</div>
               <div className="mt-1 text-lg font-extrabold">
-                {latestResult?.captive?.suspected == null ? "—" : latestResult.captive.suspected ? "YES" : "NO"}
+                {latestResult?.captive?.suspected == null
+                  ? "—"
+                  : latestResult.captive.suspected
+                    ? "YES"
+                    : "NO"}
               </div>
             </div>
           </div>
